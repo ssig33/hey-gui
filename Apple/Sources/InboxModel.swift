@@ -132,7 +132,17 @@ final class InboxModel {
         if let cached = threadCache[topicID] { return cached }
         if let task = inFlight[topicID] { return try await task.value }
         guard let cli else { throw HeyError.notFound }
-        let task = Task { try await cli.thread(topicID: topicID) }
+        let task = Task.detached {
+            var entries = try await cli.thread(topicID: topicID)
+            if entries.contains(where: { BodyText.isAttachmentOnly($0.body ?? "") }),
+               let html = try? await cli.threadHTML(topicID: topicID) {
+                for i in entries.indices { entries[i].html = html[entries[i].id] }
+            }
+            for i in entries.indices {
+                entries[i].rendered = RenderedBody.make(markdown: entries[i].body ?? "", html: entries[i].html)
+            }
+            return entries
+        }
         inFlight[topicID] = task
         defer { inFlight[topicID] = nil }
         let entries = try await task.value

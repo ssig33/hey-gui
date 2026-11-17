@@ -54,6 +54,15 @@ struct Entry: Decodable, Identifiable, Hashable {
     let recipients: Recipients?
     let body: String?
     let appUrl: String?
+    /// The original HTML body, fetched only for HTML emails whose Markdown body is just an
+    /// attachment placeholder.
+    var html: String?
+    /// The body converted for display.
+    var rendered: RenderedBody?
+
+    private enum CodingKeys: String, CodingKey {
+        case id, createdAt, creator, alternativeSenderName, kind, recipients, body, appUrl
+    }
 
     /// URL that opens this entry in the HEY web app.
     var webURL: URL? {

@@ -115,18 +115,37 @@ struct EntryView: View {
                 }
                 .font(.system(size: 11))
                 Spacer()
-                if let url = entry.webURL {
-                    OpenInBrowserButton(url: url, label: "Open This Email")
+                VStack(alignment: .trailing, spacing: 2) {
+                    if let url = entry.webURL {
+                        OpenInBrowserButton(url: url, label: "Open This Email")
+                    }
+                    if let html = entry.html {
+                        Button {
+                            Self.openHTML(html, entryID: entry.id)
+                        } label: {
+                            Label("Open HTML", systemImage: "doc.richtext")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.borderless)
+                    }
                 }
             }
-            Text(Self.render(entry.body ?? ""))
-                .font(.system(size: 13))
-                .lineSpacing(2)
-                .textSelection(.enabled)
+            BodyView(rendered: entry.rendered ?? .plain(entry.body ?? ""))
+                .foregroundStyle(entry.kind == "message" || entry.kind == nil ? .primary : .secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.top, 6)
                 .padding(.bottom, 14)
-                .foregroundStyle(entry.kind == "message" || entry.kind == nil ? .primary : .secondary)
+        }
+    }
+
+    /// Writes the HTML to a temporary file and opens it in the default browser.
+    static func openHTML(_ html: String, entryID: Int) {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("hey-gui", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("entry-\(entryID).html")
+        let page = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body>\(html)</body></html>"
+        if (try? page.write(to: url, atomically: true, encoding: .utf8)) != nil {
+            NSWorkspace.shared.open(url)
         }
     }
 
@@ -137,11 +156,6 @@ struct EntryView: View {
                 .fontWeight(bold ? .semibold : .regular)
                 .textSelection(.enabled)
         }
-    }
-
-    static func render(_ markdown: String) -> AttributedString {
-        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        return (try? AttributedString(markdown: markdown, options: options)) ?? AttributedString(markdown)
     }
 }
 

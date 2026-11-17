@@ -96,6 +96,12 @@ struct HeyCLI: Sendable {
         _ = try await run(["seen"] + postingIDs.map(String.init) + ["--json"])
     }
 
+    /// The HTML body of each entry in a thread.
+    func threadHTML(topicID: Int) async throws -> [Int: String] {
+        let data = try await run(["thread", "read", String(topicID), "--html"])
+        return HTMLBody.entries(String(decoding: data, as: UTF8.self))
+    }
+
     func search(_ query: String) async throws -> [SearchHit] {
         try await decode([SearchHit].self, ["search", query, "--in", "imbox", "--json"])
     }
