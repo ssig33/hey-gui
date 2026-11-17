@@ -50,7 +50,6 @@ type ui struct {
 	threadViewport int
 	openThread     widget.Clickable
 	entryOpen      map[int64]*widget.Clickable
-	bodies         map[int64]*renderedBody
 	htmlOpen       map[int64]*widget.Clickable
 
 	divider        gesture.Drag
@@ -60,7 +59,7 @@ type ui struct {
 
 func newUI(w *app.Window, th *material.Theme, m *model, cfg *config) *ui {
 	u := &ui{w: w, th: th, m: m, cfg: cfg,
-		rowClicks: map[int64]*widget.Clickable{}, entryOpen: map[int64]*widget.Clickable{}, bodies: map[int64]*renderedBody{}, htmlOpen: map[int64]*widget.Clickable{}}
+		rowClicks: map[int64]*widget.Clickable{}, entryOpen: map[int64]*widget.Clickable{}, htmlOpen: map[int64]*widget.Clickable{}}
 	u.search.SingleLine = true
 	u.search.Submit = true
 	u.pathEditor.SingleLine = true
@@ -220,7 +219,7 @@ func (u *ui) openSelected() {
 }
 
 func (u *ui) moveEntry(delta int) {
-	n := len(u.m.threads[u.threadFor])
+	n := len(u.m.threads[u.threadFor].entries)
 	if n == 0 {
 		return
 	}
@@ -538,7 +537,9 @@ func (u *ui) threadPane(gtx layout.Context) layout.Dimensions {
 		openURL(r.appURL)
 	}
 	u.threadViewport = gtx.Constraints.Max.Y
-	entries, loaded := u.m.threads[r.topicID]
+	t, loaded := u.m.threads[r.topicID]
+	loaded = loaded && u.m.shown == r.topicID
+	entries := t.entries
 	n := 2
 	if loaded {
 		n = 1 + len(entries)
@@ -586,10 +587,10 @@ func (u *ui) entryView(gtx layout.Context, e *entry) layout.Dimensions {
 	if open.Clicked(gtx) {
 		openURL(e.webURL())
 	}
-	body := u.bodies[e.ID]
+	body := e.rendered
 	if body == nil {
 		body = renderBody(e)
-		u.bodies[e.ID] = body
+		e.rendered = body
 	}
 	htmlOpen := u.htmlOpen[e.ID]
 	if htmlOpen == nil {

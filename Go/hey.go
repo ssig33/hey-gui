@@ -60,14 +60,19 @@ func (h heyCLI) run(args ...string) ([]byte, error) {
 }
 
 func decode[T any](h heyCLI, args ...string) (T, error) {
+	data, err := h.run(args...)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	return decodeData[T](data)
+}
+
+func decodeData[T any](data []byte) (T, error) {
 	var envelope struct {
 		Data T `json:"data"`
 	}
-	data, err := h.run(args...)
-	if err != nil {
-		return envelope.Data, err
-	}
-	err = json.Unmarshal(data, &envelope)
+	err := json.Unmarshal(data, &envelope)
 	return envelope.Data, err
 }
 
@@ -78,30 +83,57 @@ func (h heyCLI) authenticated() (bool, error) {
 	return status.Authenticated, err
 }
 
-func (h heyCLI) imbox(limit int) ([]posting, error) {
+// imboxData returns the raw JSON of the Imbox; decode it with parsePostings.
+func (h heyCLI) imboxData(limit int) ([]byte, error) {
 	args := []string{"box", "view", "imbox", "--json"}
 	if limit > 0 {
 		args = append(args, "--limit", strconv.Itoa(limit))
 	} else {
 		args = append(args, "--all")
 	}
-	box, err := decode[struct {
+	return h.run(args...)
+}
+
+func parsePostings(data []byte) ([]posting, error) {
+	box, err := decodeData[struct {
 		Postings []posting `json:"postings"`
-	}](h, args...)
+	}](data)
 	return box.Postings, err
 }
 
-func (h heyCLI) thread(topicID int64) ([]entry, error) {
-	return decode[[]entry](h, "thread", "read", strconv.FormatInt(topicID, 10), "--json")
+// threadData returns the raw `--json` and `--html` output of a thread. The HTML is
+// fetched only for HTML emails.
+func (h heyCLI) threadData(topicID int64) (jsonData, htmlData []byte, err error) {
+	id := strconv.FormatInt(topicID, 10)
+	jsonData, err = h.run("thread", "read", id, "--json")
+	if err != nil {
+		return nil, nil, err
+	}
+	entries, err := decodeData[[]entry](jsonData)
+	if err != nil {
+		return nil, nil, err
+	}
+	if hasHTMLEmail(entries) {
+		htmlData, _ = h.run("thread", "read", id, "--html")
+	}
+	return jsonData, htmlData, nil
 }
 
-// threadHTML returns the HTML body of each entry in a thread.
-func (h heyCLI) threadHTML(topicID int64) (map[int64]string, error) {
-	data, err := h.run("thread", "read", strconv.FormatInt(topicID, 10), "--html")
+// parseThread decodes a thread and renders its bodies.
+func parseThread(jsonData, htmlData []byte) ([]entry, error) {
+	entries, err := decodeData[[]entry](jsonData)
 	if err != nil {
 		return nil, err
 	}
-	return entryHTML(data), nil
+	var bodies map[int64]string
+	if htmlData != nil {
+		bodies = entryHTML(htmlData)
+	}
+	for i := range entries {
+		entries[i].HTML = bodies[entries[i].ID]
+		entries[i].rendered = renderBody(&entries[i])
+	}
+	return entries, nil
 }
 
 func (h heyCLI) search(query string) ([]searchHit, error) {
@@ -218,6 +250,8 @@ type entry struct {
 	// HTML is the original HTML body, fetched only for HTML emails whose Markdown body
 	// is just an attachment placeholder.
 	HTML string `json:"-"`
+	// rendered is the body converted for display, built off the UI goroutine.
+	rendered *renderedBody
 }
 
 func (e *entry) sender() string {
@@ -262,6 +296,11 @@ type row struct {
 	appURL     string
 	unread     bool
 	searchText string
+}
+
+// version changes when the thread gets new entries; used to tell whether a cached thread is current.
+func (r row) version() string {
+	return fmt.Sprintf("%d-%d", r.date.Unix(), r.count)
 }
 
 func newRow(topicID, postingID int64, subject, summary, sender, email string, date time.Time, count int, appURL string, unread bool) row {

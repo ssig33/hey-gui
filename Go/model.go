@@ -41,26 +41,60 @@ type model struct {
 	visible       []row
 	selected      int64
 
-	threads    map[int64][]entry
+	// threads holds loaded threads, tagged with the list version they were fetched for.
+	threads    map[int64]threadSnapshot
 	threadErrs map[int64]string
 	inFlight   map[int64]bool
+	// versions of each thread in the list: change when a thread gets new entries.
+	versions map[int64]string
+	// shown is the thread whose body the thread pane shows. It follows the selection
+	// once the selection settles, so holding j doesn't lay out every thread.
+	shown int64
+
+	prefetchQueue   []int64
+	prefetchRunning int
 }
+
+type threadSnapshot struct {
+	version string
+	entries []entry
+}
+
+const prefetchLimit = 3
 
 func newModel(cfg *config, post func(func())) *model {
 	return &model{cfg: cfg, post: post, unread: map[int64]bool{}, postingIDs: map[int64]int64{},
-		threads: map[int64][]entry{}, threadErrs: map[int64]string{}, inFlight: map[int64]bool{}}
+		threads: map[int64]threadSnapshot{}, threadErrs: map[int64]string{}, inFlight: map[int64]bool{},
+		versions: map[int64]string{}}
 }
 
 func (m *model) reload() {
 	m.generation++
 	gen := m.generation
-	m.auth = authChecking
+	if len(m.rows) == 0 {
+		m.auth = authChecking
+	}
 	m.loadErr = ""
-	m.threads = map[int64][]entry{}
 	m.threadErrs = map[int64]string{}
-	m.inFlight = map[int64]bool{}
+	m.prefetchQueue = nil
 	override := m.cfg.HeyPath
+	showCached := len(m.rows) == 0
 	go func() {
+		var cached []posting
+		if showCached {
+			// Show the list from the last launch while checking login and fetching the latest one.
+			if data := loadCachedImbox(); data != nil {
+				if postings, err := parsePostings(data); err == nil && len(postings) > 0 {
+					cached = postings
+					m.post(func() {
+						if gen == m.generation && len(m.rows) == 0 {
+							m.auth = authLoggedIn
+							m.setRows(postings)
+						}
+					})
+				}
+			}
+		}
 		path := locateHey(override)
 		if path == "" {
 			m.post(func() { m.auth = authCLIMissing })
@@ -81,16 +115,24 @@ func (m *model) reload() {
 				m.authErr = errorText(err)
 			default:
 				m.auth = authLoggedIn
-				m.loading = true
-				go m.loadImbox(cli, gen)
+				m.loading = len(m.rows) == 0
+				if m.selected != 0 {
+					m.selectionChanged()
+				}
+				go m.loadImbox(cli, gen, cached)
 			}
 		})
 	}()
 }
 
 // loadImbox shows the first 100 postings, then the rest. --all takes about 20 seconds for 1000 postings.
-func (m *model) loadImbox(cli heyCLI, gen int) {
-	first, err := cli.imbox(100)
+// Until the rest arrives, cached postings older than the first 100 stay in the list.
+func (m *model) loadImbox(cli heyCLI, gen int, cached []posting) {
+	data, err := cli.imboxData(100)
+	var first []posting
+	if err == nil {
+		first, err = parsePostings(data)
+	}
 	m.post(func() {
 		if gen != m.generation {
 			return
@@ -100,13 +142,28 @@ func (m *model) loadImbox(cli heyCLI, gen int) {
 			m.loadErr = errorText(err)
 			return
 		}
-		m.setRows(first)
+		ids := map[int64]bool{}
+		for _, p := range first {
+			ids[p.TopicID] = true
+		}
+		merged := first
+		for _, p := range cached {
+			if !ids[p.TopicID] {
+				merged = append(merged, p)
+			}
+		}
+		m.setRows(merged)
+		m.prefetchList()
 		m.loadingRest = true
 	})
 	if err != nil {
 		return
 	}
-	all, err := cli.imbox(0)
+	data, err = cli.imboxData(0)
+	var all []posting
+	if err == nil {
+		all, err = parsePostings(data)
+	}
 	m.post(func() {
 		if gen != m.generation {
 			return
@@ -117,6 +174,15 @@ func (m *model) loadImbox(cli heyCLI, gen int) {
 			return
 		}
 		m.setRows(all)
+		m.prefetchList()
+		keep := map[int64]bool{}
+		for _, r := range m.rows {
+			keep[r.topicID] = true
+		}
+		go func() {
+			saveCachedImbox(data)
+			pruneCachedThreads(keep)
+		}()
 	})
 }
 
@@ -125,6 +191,7 @@ func (m *model) setRows(postings []posting) {
 	m.rows = m.rows[:0:0]
 	m.unread = map[int64]bool{}
 	m.postingIDs = map[int64]int64{}
+	m.versions = map[int64]string{}
 	for _, p := range postings {
 		r, ok := rowFromPosting(p)
 		if !ok || seen[r.topicID] {
@@ -133,6 +200,7 @@ func (m *model) setRows(postings []posting) {
 		seen[r.topicID] = true
 		m.rows = append(m.rows, r)
 		m.postingIDs[r.topicID] = r.postingID
+		m.versions[r.topicID] = r.version()
 		if r.unread {
 			m.unread[r.topicID] = true
 		}
@@ -191,58 +259,153 @@ func (m *model) selectedRow() (row, bool) {
 	return row{}, false
 }
 
-// fetchThread loads a thread once; concurrent requests for the same topic share one call.
+// isFresh reports whether the loaded thread matches the current list.
+func (m *model) isFresh(topicID int64) bool {
+	t, ok := m.threads[topicID]
+	return ok && t.version != "" && t.version == m.versions[topicID]
+}
+
+// fetchThread loads the latest version of a thread: from the disk cache if it matches the
+// current list, otherwise from hey. Concurrent requests for the same topic share one call.
 func (m *model) fetchThread(topicID int64, prefetch bool) {
-	if _, ok := m.threads[topicID]; ok || m.inFlight[topicID] {
+	if m.isFresh(topicID) || m.inFlight[topicID] || m.cli.path == "" {
+		if prefetch {
+			m.prefetchDone()
+		}
 		return
 	}
 	m.inFlight[topicID] = true
-	cli := m.cli
+	cli, version := m.cli, m.versions[topicID]
 	go func() {
-		entries, err := cli.thread(topicID)
-		if err == nil && hasHTMLEmail(entries) {
-			if bodies, herr := cli.threadHTML(topicID); herr == nil {
-				for i := range entries {
-					entries[i].HTML = bodies[entries[i].ID]
-				}
+		var entries []entry
+		var err error
+		if t, ok := loadCachedThread(topicID); ok && version != "" && t.Version == version {
+			entries, err = parseThread(t.JSON, t.HTML)
+		} else {
+			var jsonData, htmlData []byte
+			jsonData, htmlData, err = cli.threadData(topicID)
+			if err == nil {
+				entries, err = parseThread(jsonData, htmlData)
+			}
+			if err == nil {
+				saveCachedThread(topicID, cachedThread{Version: version, JSON: jsonData, HTML: htmlData})
 			}
 		}
 		m.post(func() {
 			delete(m.inFlight, topicID)
 			if err != nil {
 				m.threadErrs[topicID] = errorText(err)
-				return
+			} else {
+				delete(m.threadErrs, topicID)
+				m.threads[topicID] = threadSnapshot{version, entries}
 			}
-			m.threads[topicID] = entries
-			if !prefetch {
-				m.prefetchNeighbors(topicID)
+			if prefetch {
+				m.prefetchDone()
 			}
 		})
 	}()
 }
 
-// prefetchNeighbors loads the threads before and after the given one.
+// prefetchNeighbors loads the threads around the given one ahead of the rest of the queue.
 func (m *model) prefetchNeighbors(topicID int64) {
 	i := m.indexOf(topicID)
-	for _, j := range []int{i + 1, i - 1} {
-		if i >= 0 && j >= 0 && j < len(m.visible) {
-			m.fetchThread(m.visible[j].topicID, true)
+	if i < 0 {
+		return
+	}
+	var ids []int64
+	for _, d := range []int{1, 2, 3, 4, 5, -1, -2} {
+		if j := i + d; j >= 0 && j < len(m.visible) {
+			ids = append(ids, m.visible[j].topicID)
 		}
+	}
+	m.enqueuePrefetch(ids, true)
+}
+
+// prefetchList loads unread threads and the top of the list in the background.
+func (m *model) prefetchList() {
+	var ids []int64
+	for i, r := range m.visible {
+		if i < 30 || m.unread[r.topicID] {
+			ids = append(ids, r.topicID)
+		}
+	}
+	m.enqueuePrefetch(ids, false)
+}
+
+func (m *model) enqueuePrefetch(ids []int64, front bool) {
+	add := map[int64]bool{}
+	var list []int64
+	for _, id := range ids {
+		if !add[id] && !m.isFresh(id) {
+			add[id] = true
+			list = append(list, id)
+		}
+	}
+	rest := m.prefetchQueue[:0:0]
+	for _, id := range m.prefetchQueue {
+		if !add[id] {
+			rest = append(rest, id)
+		}
+	}
+	if front {
+		m.prefetchQueue = append(list, rest...)
+	} else {
+		m.prefetchQueue = append(rest, list...)
+	}
+	m.pumpPrefetch()
+}
+
+func (m *model) pumpPrefetch() {
+	for m.prefetchRunning < prefetchLimit && m.cli.path != "" && len(m.prefetchQueue) > 0 {
+		id := m.prefetchQueue[0]
+		m.prefetchQueue = m.prefetchQueue[1:]
+		if m.isFresh(id) || m.inFlight[id] {
+			continue
+		}
+		m.prefetchRunning++
+		m.fetchThread(id, true)
 	}
 }
 
-// selectionChanged waits briefly so holding j doesn't fetch every thread along the way.
+func (m *model) prefetchDone() {
+	m.prefetchRunning--
+	m.pumpPrefetch()
+}
+
+// selectionChanged shows the selected thread once the selection settles, so pressing j
+// repeatedly doesn't lay out or load every thread along the way.
 func (m *model) selectionChanged() {
 	id := m.selected
-	if _, ok := m.threads[id]; ok {
-		m.prefetchNeighbors(id)
-		return
-	}
-	time.AfterFunc(80*time.Millisecond, func() {
+	time.AfterFunc(70*time.Millisecond, func() {
 		m.post(func() {
-			if m.selected == id {
-				m.fetchThread(id, false)
+			if m.selected != id {
+				return
 			}
+			m.shown = id
+			m.prefetchNeighbors(id)
+			if m.isFresh(id) {
+				return
+			}
+			if _, ok := m.threads[id]; ok {
+				m.fetchThread(id, false)
+				return
+			}
+			// Show the disk copy, even if out of date, while fetching the latest.
+			go func() {
+				t, ok := loadCachedThread(id)
+				var entries []entry
+				if ok {
+					var err error
+					entries, err = parseThread(t.JSON, t.HTML)
+					ok = err == nil
+				}
+				m.post(func() {
+					if _, loaded := m.threads[id]; ok && !loaded {
+						m.threads[id] = threadSnapshot{t.Version, entries}
+					}
+					m.fetchThread(id, false)
+				})
+			}()
 		})
 	})
 }
