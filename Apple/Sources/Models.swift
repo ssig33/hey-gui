@@ -119,6 +119,11 @@ struct Row: Identifiable, Hashable {
         searchText = [subject, summary, sender, email].joined(separator: "\n").lowercased()
     }
 
+    /// Changes when the thread gets new entries; used to tell whether a cached thread is current.
+    var version: String {
+        "\(Int(date?.timeIntervalSince1970 ?? 0))-\(count)"
+    }
+
     init?(posting p: Posting) {
         guard let topicID = p.topicId else { return nil }
         self.init(

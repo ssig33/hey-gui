@@ -68,7 +68,10 @@ struct HeyCLI: Sendable {
     }
 
     func decode<T: Decodable>(_ type: T.Type, _ arguments: [String]) async throws -> T {
-        let data = try await run(arguments)
+        try Self.decode(type, from: try await run(arguments))
+    }
+
+    static func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         return try decoder.decode(Envelope<T>.self, from: data).data
@@ -78,28 +81,42 @@ struct HeyCLI: Sendable {
         try await decode(AuthStatus.self, ["auth", "status", "--json"])
     }
 
-    func imbox(limit: Int?) async throws -> [Posting] {
+    /// The raw JSON of the Imbox; decode it with `postings(from:)`.
+    func imboxData(limit: Int?) async throws -> Data {
         var args = ["box", "view", "imbox", "--json"]
         if let limit {
             args += ["--limit", String(limit)]
         } else {
             args.append("--all")
         }
-        return try await decode(BoxView.self, args).postings
+        return try await run(args)
     }
 
-    func thread(topicID: Int) async throws -> [Entry] {
-        try await decode([Entry].self, ["thread", "read", String(topicID), "--json"])
+    static func postings(from data: Data) throws -> [Posting] {
+        try decode(BoxView.self, from: data).postings
+    }
+
+    /// The raw `--json` and `--html` output of a thread. The HTML is fetched only for HTML emails.
+    func threadData(topicID: Int) async throws -> (json: Data, html: Data?) {
+        let json = try await run(["thread", "read", String(topicID), "--json"])
+        let entries = try Self.decode([Entry].self, from: json)
+        guard entries.contains(where: { BodyText.isAttachmentOnly($0.body ?? "") }) else { return (json, nil) }
+        return (json, try? await run(["thread", "read", String(topicID), "--html"]))
+    }
+
+    /// Decodes a thread and renders its bodies.
+    static func entries(json: Data, html: Data?) throws -> [Entry] {
+        var entries = try decode([Entry].self, from: json)
+        let bodies = html.map { HTMLBody.entries(String(decoding: $0, as: UTF8.self)) } ?? [:]
+        for i in entries.indices {
+            entries[i].html = bodies[entries[i].id]
+            entries[i].rendered = RenderedBody.make(markdown: entries[i].body ?? "", html: entries[i].html)
+        }
+        return entries
     }
 
     func markSeen(postingIDs: [Int]) async throws {
         _ = try await run(["seen"] + postingIDs.map(String.init) + ["--json"])
-    }
-
-    /// The HTML body of each entry in a thread.
-    func threadHTML(topicID: Int) async throws -> [Int: String] {
-        let data = try await run(["thread", "read", String(topicID), "--html"])
-        return HTMLBody.entries(String(decoding: data, as: UTF8.self))
     }
 
     func search(_ query: String) async throws -> [SearchHit] {

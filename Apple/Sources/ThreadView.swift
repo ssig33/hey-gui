@@ -58,18 +58,25 @@ struct ThreadView: View {
         entryIndex = 0
         position.scrollTo(edge: .top)
         guard let topicID else { return }
-        if loaded?.id != topicID {
-            // Wait briefly so holding j doesn't fetch every thread along the way.
-            try? await Task.sleep(for: .milliseconds(80))
+        var cached = model.cachedEntries(for: topicID)
+        if cached == nil {
+            // Wait briefly so holding j doesn't load every thread along the way.
+            try? await Task.sleep(for: .milliseconds(60))
+            if Task.isCancelled { return }
+            cached = await model.diskEntries(for: topicID)
             if Task.isCancelled { return }
         }
+        if let cached {
+            loaded = (topicID, cached.entries)
+        }
+        model.prefetchNeighbors(of: topicID)
+        if cached?.fresh == true { return }
         do {
             let entries = try await model.entries(for: topicID)
             if Task.isCancelled { return }
             loaded = (topicID, entries)
-            model.prefetchNeighbors(of: topicID)
         } catch {
-            if !Task.isCancelled { self.error = error.localizedDescription }
+            if !Task.isCancelled && cached == nil { self.error = error.localizedDescription }
         }
     }
 

@@ -57,9 +57,17 @@ final class InboxModel {
     private var seq = 0
 
     private var cli: HeyCLI?
-    private var threadCache: [Int: [Entry]] = [:]
-    private var inFlight: [Int: Task<[Entry], Error>] = [:]
     private var loadGeneration = 0
+
+    /// Threads in memory, tagged with the list version they were fetched for.
+    private var threads: [Int: (version: String?, entries: [Entry])] = [:]
+    private var inFlight: [Int: Task<[Entry], Error>] = [:]
+    /// Version of each thread in the list: changes when a thread gets new entries.
+    private var versions: [Int: String] = [:]
+
+    private var prefetchQueue: [Int] = []
+    private var prefetchRunning = 0
+    private let prefetchLimit = 3
 
     var selectedRow: Row? {
         guard let selection else { return nil }
@@ -71,10 +79,17 @@ final class InboxModel {
     func reload() async {
         loadGeneration += 1
         let generation = loadGeneration
-        auth = .checking
         loadError = nil
-        threadCache = [:]
-        inFlight = [:]
+        prefetchQueue = []
+        var cached: [Posting] = []
+        if rows.isEmpty, let data = await Task.detached(operation: { DiskCache.loadImbox() }).value,
+           let postings = try? HeyCLI.postings(from: data) {
+            // Show the list from the last launch while checking login and fetching the latest one.
+            cached = postings
+            setRows(postings)
+            auth = .loggedIn
+        }
+        if rows.isEmpty { auth = .checking }
         let override = UserDefaults.standard.string(forKey: "heyPath") ?? ""
         let url = await Task.detached { HeyLocator.locate(override: override) }.value
         guard let url else {
@@ -99,16 +114,26 @@ final class InboxModel {
         }
 
         // --all takes about 20 seconds for 1000 postings, so show the first 100 and load the rest afterwards.
-        isLoading = true
+        isLoading = rows.isEmpty
         do {
-            let first = try await cli.imbox(limit: 100)
+            let first = try HeyCLI.postings(from: try await cli.imboxData(limit: 100))
             guard generation == loadGeneration else { return }
-            setRows(first)
+            // Until the rest arrives, keep the older cached postings below the first 100.
+            let firstIDs = Set(first.compactMap(\.topicId))
+            setRows(first + cached.filter { !firstIDs.contains($0.topicId ?? 0) })
+            prefetchList()
             isLoading = false
             isLoadingRest = true
-            let all = try await cli.imbox(limit: nil)
+            let data = try await cli.imboxData(limit: nil)
+            let all = try HeyCLI.postings(from: data)
             guard generation == loadGeneration else { return }
             setRows(all)
+            prefetchList()
+            let ids = Set(rows.map(\.id))
+            Task.detached(priority: .background) {
+                DiskCache.saveImbox(data)
+                DiskCache.pruneThreads(keeping: ids)
+            }
         } catch {
             guard generation == loadGeneration else { return }
             loadError = error.localizedDescription
@@ -122,40 +147,98 @@ final class InboxModel {
         let list = postings.compactMap(Row.init(posting:)).filter { seen.insert($0.id).inserted }
         unread = Set(list.filter(\.unread).map(\.id))
         postingIDs = Dictionary(list.compactMap { row in row.postingID.map { (row.id, $0) } }, uniquingKeysWith: { a, _ in a })
+        versions = Dictionary(list.map { ($0.id, $0.version) }, uniquingKeysWith: { a, _ in a })
         rows = list
         if selection == nil || !visibleRows.contains(where: { $0.id == selection }) {
             selection = visibleRows.first?.id
         }
     }
 
-    func entries(for topicID: Int) async throws -> [Entry] {
-        if let cached = threadCache[topicID] { return cached }
+    // MARK: - Threads
+
+    /// A thread already in memory, and whether it matches the current list.
+    func cachedEntries(for topicID: Int) -> (entries: [Entry], fresh: Bool)? {
+        guard let thread = threads[topicID] else { return nil }
+        return (thread.entries, isFresh(thread.version, topicID))
+    }
+
+    private func isFresh(_ version: String?, _ topicID: Int) -> Bool {
+        version != nil && version == versions[topicID]
+    }
+
+    /// Reads a thread from the disk cache even if it is out of date, to show while fetching the latest.
+    func diskEntries(for topicID: Int) async -> (entries: [Entry], fresh: Bool)? {
+        if let memory = cachedEntries(for: topicID) { return memory }
+        let stored = await Task.detached(priority: .userInitiated) { () -> (String?, [Entry])? in
+            guard let thread = DiskCache.loadThread(topicID),
+                  let entries = try? HeyCLI.entries(json: thread.json, html: thread.html) else { return nil }
+            return (thread.version, entries)
+        }.value
+        guard let (version, entries) = stored else { return nil }
+        if threads[topicID] == nil { threads[topicID] = (version, entries) }
+        return cachedEntries(for: topicID)
+    }
+
+    /// The latest entries of a thread: from memory or disk if they match the current list, otherwise from hey.
+    func entries(for topicID: Int, priority: TaskPriority = .userInitiated) async throws -> [Entry] {
+        if let cached = cachedEntries(for: topicID), cached.fresh { return cached.entries }
         if let task = inFlight[topicID] { return try await task.value }
-        guard let cli else { throw HeyError.notFound }
-        let task = Task.detached {
-            var entries = try await cli.thread(topicID: topicID)
-            if entries.contains(where: { BodyText.isAttachmentOnly($0.body ?? "") }),
-               let html = try? await cli.threadHTML(topicID: topicID) {
-                for i in entries.indices { entries[i].html = html[entries[i].id] }
+        let version = versions[topicID]
+        let cli = cli
+        let task = Task.detached(priority: priority) { () -> [Entry] in
+            if let version, let thread = DiskCache.loadThread(topicID), thread.version == version,
+               let entries = try? HeyCLI.entries(json: thread.json, html: thread.html) {
+                return entries
             }
-            for i in entries.indices {
-                entries[i].rendered = RenderedBody.make(markdown: entries[i].body ?? "", html: entries[i].html)
-            }
+            guard let cli else { throw HeyError.notFound }
+            let (json, html) = try await cli.threadData(topicID: topicID)
+            let entries = try HeyCLI.entries(json: json, html: html)
+            DiskCache.saveThread(topicID, .init(version: version, json: json, html: html))
             return entries
         }
         inFlight[topicID] = task
         defer { inFlight[topicID] = nil }
         let entries = try await task.value
-        threadCache[topicID] = entries
+        threads[topicID] = (version, entries)
         return entries
     }
 
-    /// Prefetches the threads before and after the selected one.
+    /// Prefetches the threads around the selected one ahead of the rest of the queue.
     func prefetchNeighbors(of topicID: Int) {
         guard let index = visibleRows.firstIndex(where: { $0.id == topicID }) else { return }
-        for i in [index + 1, index - 1] where visibleRows.indices.contains(i) {
-            let id = visibleRows[i].id
-            Task { _ = try? await entries(for: id) }
+        let around = [1, 2, 3, 4, 5, -1, -2].map { index + $0 }.filter(visibleRows.indices.contains)
+        enqueuePrefetch(around.map { visibleRows[$0].id }, front: true)
+    }
+
+    /// Prefetches unread threads and the top of the list in the background.
+    private func prefetchList() {
+        let top = visibleRows.prefix(30).map(\.id)
+        let unreadIDs = visibleRows.filter { unread.contains($0.id) }.map(\.id)
+        enqueuePrefetch(top + unreadIDs, front: false)
+    }
+
+    private func enqueuePrefetch(_ ids: [Int], front: Bool) {
+        var seen = Set<Int>()
+        let ids = ids.filter { seen.insert($0).inserted && cachedEntries(for: $0)?.fresh != true }
+        prefetchQueue.removeAll(where: seen.contains)
+        if front {
+            prefetchQueue.insert(contentsOf: ids, at: 0)
+        } else {
+            prefetchQueue.append(contentsOf: ids)
+        }
+        pumpPrefetch()
+    }
+
+    private func pumpPrefetch() {
+        while prefetchRunning < prefetchLimit, cli != nil, !prefetchQueue.isEmpty {
+            let id = prefetchQueue.removeFirst()
+            if cachedEntries(for: id)?.fresh == true || inFlight[id] != nil { continue }
+            prefetchRunning += 1
+            Task {
+                _ = try? await entries(for: id, priority: .utility)
+                prefetchRunning -= 1
+                pumpPrefetch()
+            }
         }
     }
 
