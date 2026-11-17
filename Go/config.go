@@ -6,7 +6,8 @@ import (
 	"path/filepath"
 )
 
-// config is saved to ~/Library/Application Support/hey-gui/config.json.
+// config is saved to hey-gui/config.json under os.UserConfigDir
+// (~/Library/Application Support on macOS, ~/.config on Linux).
 type config struct {
 	HeyPath     string  `json:"hey_path"`
 	NewestFirst bool    `json:"newest_first"`

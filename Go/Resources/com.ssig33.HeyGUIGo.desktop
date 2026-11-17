@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=HEY Imbox (Go)
+Comment=HEY Imbox reader
+Exec=@BIN@
+Icon=com.ssig33.HeyGUIGo
+Terminal=false
+Categories=Network;Email;
+StartupWMClass=com.ssig33.HeyGUIGo

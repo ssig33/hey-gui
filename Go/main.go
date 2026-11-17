@@ -80,7 +80,8 @@ func run(w *app.Window, cfg *config) error {
 	}
 }
 
-// loadFonts uses Hiragino Sans for Japanese text, with the Go fonts as a fallback.
+// loadFonts uses Hiragino Sans (macOS) or Noto Sans CJK JP (Linux) for Japanese text,
+// with the Go fonts as a fallback.
 func loadFonts() []font.FontFace {
 	var faces []font.FontFace
 	for _, f := range []struct {
@@ -89,6 +90,10 @@ func loadFonts() []font.FontFace {
 	}{
 		{"/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc", font.Normal},
 		{"/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc", font.Bold},
+		{"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc", font.Normal},
+		{"/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc", font.Bold},
+		{"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc", font.Normal},
+		{"/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", font.Bold},
 	} {
 		data, err := os.ReadFile(f.path)
 		if err != nil {

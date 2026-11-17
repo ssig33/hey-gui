@@ -2,6 +2,7 @@ package main
 
 import (
 	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -536,7 +537,11 @@ func (m *model) markSeenAndAdvance() {
 
 func openURL(url string) {
 	if url != "" {
-		_ = exec.Command("open", url).Start()
+		opener := "open"
+		if runtime.GOOS == "linux" {
+			opener = "xdg-open"
+		}
+		_ = exec.Command(opener, url).Start()
 	}
 }
 
