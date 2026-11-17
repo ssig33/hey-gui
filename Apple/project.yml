@@ -1,0 +1,36 @@
+name: HeyGUI
+options:
+  developmentLanguage: en
+  deploymentTarget:
+    macOS: "27.0"
+
+schemes:
+  HeyGUI:
+    build:
+      targets:
+        HeyGUI: all
+    run:
+      config: Debug
+    archive:
+      config: Release
+
+targets:
+  HeyGUI:
+    platform: macOS
+    type: application
+    sources:
+      - Sources
+      - Resources
+    settings:
+      DEVELOPMENT_TEAM: QXF7ZWFA28
+      GENERATE_INFOPLIST_FILE: true
+      CURRENT_PROJECT_VERSION: 1
+      MARKETING_VERSION: "0.0.1"
+      PRODUCT_BUNDLE_IDENTIFIER: com.ssig33.HeyGUI
+      SWIFT_VERSION: "5.0"
+      SWIFT_EMIT_LOC_STRINGS: YES
+      ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+      INFOPLIST_KEY_CFBundleDisplayName: HEY Imbox
+      INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+      # The app runs the hey CLI as a child process, so App Sandbox is off.
+      ENABLE_APP_SANDBOX: false
