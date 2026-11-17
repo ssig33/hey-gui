@@ -12,7 +12,7 @@ struct ThreadView: View {
         Group {
             if let row = model.selectedRow {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 0) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
                         HStack(alignment: .firstTextBaseline) {
                             Text(row.subject)
                                 .font(.system(size: 15, weight: .semibold))
@@ -58,14 +58,11 @@ struct ThreadView: View {
         entryIndex = 0
         position.scrollTo(edge: .top)
         guard let topicID else { return }
-        var cached = model.cachedEntries(for: topicID)
-        if cached == nil {
-            // Wait briefly so holding j doesn't load every thread along the way.
-            try? await Task.sleep(for: .milliseconds(60))
-            if Task.isCancelled { return }
-            cached = await model.diskEntries(for: topicID)
-            if Task.isCancelled { return }
-        }
+        // Wait until the selection settles, so pressing j repeatedly doesn't lay out every thread along the way.
+        try? await Task.sleep(for: .milliseconds(70))
+        if Task.isCancelled { return }
+        let cached = await model.diskEntries(for: topicID)
+        if Task.isCancelled { return }
         if let cached {
             loaded = (topicID, cached.entries)
         }
