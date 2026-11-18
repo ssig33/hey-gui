@@ -9,7 +9,8 @@ import (
 	"strings"
 )
 
-// Raw hey CLI output kept in ~/Library/Caches/hey-gui so the list and threads show instantly on the next launch.
+// Raw hey CLI output kept in hey-gui under os.UserCacheDir (~/Library/Caches on macOS,
+// ~/.cache on Linux) so the list and threads show instantly on the next launch.
 
 func cacheDir() string {
 	dir, err := os.UserCacheDir()
