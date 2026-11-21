@@ -256,11 +256,11 @@ type entry struct {
 
 func (e *entry) sender() string {
 	if e.AltSender != "" && (e.Creator == nil || e.AltSender != e.Creator.Name) {
-		email := ""
+		c := contact{Name: e.AltSender}
 		if e.Creator != nil {
-			email = e.Creator.Email
+			c.Email = e.Creator.Email
 		}
-		return e.AltSender + " <" + email + ">"
+		return c.display()
 	}
 	return e.Creator.display()
 }
@@ -317,20 +317,27 @@ func newRow(topicID, postingID int64, subject, summary, sender, email string, da
 	}
 }
 
-func rowFromPosting(p posting) (row, bool) {
-	if p.TopicID == 0 {
-		return row{}, false
-	}
-	sender, email := p.AltSender, ""
-	if p.Creator != nil {
-		email = p.Creator.Email
+// senderAndEmail picks the list's sender name: the alternative sender name, else the
+// creator's name, else the creator's email.
+func senderAndEmail(alt string, c *contact) (sender, email string) {
+	sender = alt
+	if c != nil {
+		email = c.Email
 		if sender == "" {
-			sender = p.Creator.Name
+			sender = c.Name
 		}
 	}
 	if sender == "" {
 		sender = email
 	}
+	return sender, email
+}
+
+func rowFromPosting(p posting) (row, bool) {
+	if p.TopicID == 0 {
+		return row{}, false
+	}
+	sender, email := senderAndEmail(p.AltSender, p.Creator)
 	// Unread postings come back with seen = null.
 	unread := p.Seen == nil || !*p.Seen
 	return newRow(p.TopicID, p.ID, p.Name, p.Summary, sender, email, parseTime(p.ActiveAt), p.Count, p.AppURL, unread), true
@@ -340,13 +347,7 @@ func rowFromHit(h searchHit) row {
 	sender, email, appURL := "", "", fmt.Sprintf("https://app.hey.com/topics/%d", h.TopicID)
 	if len(h.Messages) > 0 {
 		m := h.Messages[0]
-		sender = m.AltSender
-		if m.Creator != nil {
-			email = m.Creator.Email
-			if sender == "" {
-				sender = m.Creator.Name
-			}
-		}
+		sender, email = senderAndEmail(m.AltSender, m.Creator)
 		if m.AppURL != "" {
 			appURL = m.AppURL
 		}
