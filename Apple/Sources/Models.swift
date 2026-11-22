@@ -17,11 +17,12 @@ struct Contact: Decodable, Hashable {
     let emailAddress: String?
 
     var display: String {
-        switch (name, emailAddress) {
-        case let (name?, email?) where !name.isEmpty: return "\(name) <\(email)>"
-        case let (name?, nil): return name
-        case let (_, email?): return email
-        default: return "?"
+        let name = self.name ?? "", email = emailAddress ?? ""
+        switch (name.isEmpty, email.isEmpty) {
+        case (false, false): return "\(name) <\(email)>"
+        case (false, true): return name
+        case (true, false): return email
+        case (true, true): return "?"
         }
     }
 }
@@ -71,7 +72,7 @@ struct Entry: Decodable, Identifiable, Hashable {
 
     var sender: String {
         if let alt = alternativeSenderName, !alt.isEmpty, alt != creator?.name {
-            return "\(alt) <\(creator?.emailAddress ?? "")>"
+            return Contact(name: alt, emailAddress: creator?.emailAddress).display
         }
         return creator?.display ?? "?"
     }
